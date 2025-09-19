@@ -375,3 +375,127 @@
     parent-outcome: (string-ascii 50),
     resolution-logic: (buff 1)  ;; 0x01: auto-resolve, 0x02: oracle resolves
   })
+
+;; Check conditional market
+(define-read-only (get-conditional-market-parent (market-id uint))
+  (map-get? conditional-markets market-id))
+
+;; Check if market is conditional
+(define-read-only (is-conditional-market (market-id uint))
+  (is-some (map-get? conditional-markets market-id)))
+
+;; Notification types
+(define-constant notification-market-resolved 0x01)
+(define-constant notification-dispute-started 0x02)
+(define-constant notification-position-profitable 0x03)
+(define-constant notification-liquidity-update 0x04)
+(define-constant notification-oracle-vote 0x05)
+
+;; Notification storage
+(define-map user-notifications
+  { user: principal, notification-id: uint }
+  {
+    market-id: uint,
+    notification-type: (buff 1),
+    message: (string-utf8 200),
+    created-at: uint,
+    read: bool
+  })
+(define-data-var notification-id-nonce uint u0)
+
+;; Create notification (private helper)
+(define-private (create-notification 
+  (user principal) 
+  (market-id uint) 
+  (notification-type (buff 1))
+  (message (string-utf8 200)))
+  
+  (let ((notification-id (var-get notification-id-nonce)))
+    ;; Store notification
+    (map-set user-notifications
+      { user: user, notification-id: notification-id }
+      {
+        market-id: market-id,
+        notification-type: notification-type,
+        message: message,
+        created-at: stacks-block-height,
+        read: false
+      })
+    
+    ;; Increment nonce
+    (var-set notification-id-nonce (+ notification-id u1))
+    
+    notification-id))
+
+;; Get user notifications
+(define-read-only (get-user-notifications (user principal) (limit uint) (offset uint))
+  ;; This would need a more complex implementation to be efficient
+  ;; For now returning a placeholder
+  (ok (list)))
+
+;; Mark notification as read
+(define-public (mark-notification-read (notification-id uint))
+  (let ((notification (unwrap! (map-get? user-notifications { user: tx-sender, notification-id: notification-id }) error-invalid-params)))
+    (map-set user-notifications
+      { user: tx-sender, notification-id: notification-id }
+      (merge notification { read: true }))
+    (ok true)))
+
+    ;; Market templates storage
+(define-map market-templates 
+  uint 
+  {
+    title: (string-ascii 100),
+    description: (string-utf8 500),
+    outcome-type: (buff 1),
+    possible-outcomes: (list 10 (string-ascii 50)),
+    duration-blocks: uint,
+    oracle-fee: uint,
+    market-fee: uint,
+    category: (string-ascii 20),
+    tags: (list 5 (string-ascii 20)),
+    outcome-values: (optional (list 10 uint)),
+    creator: principal
+  })
+
+(define-data-var template-id-nonce uint u0)
+
+;; Create a market template
+(define-public (create-market-template
+  (title (string-ascii 100))
+  (description (string-utf8 500))
+  (outcome-type (buff 1))
+  (possible-outcomes (list 10 (string-ascii 50)))
+  (duration-blocks uint)
+  (oracle-fee uint)
+  (market-fee uint)
+  (category (string-ascii 20))
+  (tags (list 5 (string-ascii 20)))
+  (outcome-values (optional (list 10 uint))))
+  
+  (let ((template-id (var-get template-id-nonce)))
+    ;; Validate params
+    (asserts! (and (>= duration-blocks min-market-duration)
+                   (<= duration-blocks max-market-duration)) error-invalid-params)
+    (asserts! (and (<= oracle-fee u100)
+                   (<= market-fee u100)) error-invalid-fee)
+    
+    ;; Store template
+    (map-set market-templates template-id {
+      title: title,
+      description: description,
+      outcome-type: outcome-type,
+      possible-outcomes: possible-outcomes,
+      duration-blocks: duration-blocks,
+      oracle-fee: oracle-fee,
+      market-fee: market-fee,
+      category: category,
+      tags: tags,
+      outcome-values: outcome-values,
+      creator: tx-sender
+    })
+    
+    ;; Increment template id
+    (var-set template-id-nonce (+ template-id u1))
+    
+    (ok template-id)))
