@@ -786,3 +786,110 @@
           { tokens: (+ (get tokens user-lp-balance) new-lp-tokens) })
         
         (ok new-lp-tokens)))))
+
+;; Remove liquidity from AMM
+(define-public (remove-amm-liquidity (market-id uint) (lp-amount uint))
+  (let ((pool (unwrap! (map-get? amm-pools market-id) error-invalid-market))
+        (market (unwrap! (map-get? markets market-id) error-invalid-market))
+        (user-lp-balance (unwrap! (map-get? amm-lp-balances 
+                                  { market-id: market-id, provider: tx-sender }) 
+                                  error-invalid-amount))
+        (total-lp-tokens (get lp-tokens pool))
+        (yes-pool (get yes-pool pool))
+        (no-pool (get no-pool pool)))
+    
+    ;; Check user has enough LP tokens
+    (asserts! (>= (get tokens user-lp-balance) lp-amount) error-invalid-amount)
+    
+    ;; Calculate share of pool
+    (let ((share-ratio (/ (* lp-amount u1000000) total-lp-tokens))
+          (yes-amount (/ (* yes-pool share-ratio) u1000000))
+          (no-amount (/ (* no-pool share-ratio) u1000000)))
+      
+      ;; Transfer funds to user
+      (as-contract (try! (stx-transfer? (+ yes-amount no-amount) tx-sender tx-sender)))
+      
+      ;; Update pool state
+      (map-set amm-pools market-id
+        (merge pool {
+          yes-pool: (- yes-pool yes-amount),
+          no-pool: (- no-pool no-amount),
+          constant-product: (* (- yes-pool yes-amount) (- no-pool no-amount)),
+          lp-tokens: (- total-lp-tokens lp-amount)
+        }))
+      
+      ;; Update LP token balance
+      (map-set amm-lp-balances
+        { market-id: market-id, provider: tx-sender }
+        { tokens: (- (get tokens user-lp-balance) lp-amount) })
+      
+      (ok { yes-amount: yes-amount, no-amount: no-amount }))))
+
+;; Get AMM pool details
+(define-read-only (get-amm-pool (market-id uint))
+  (map-get? amm-pools market-id))
+
+;; Get AMM LP balance
+(define-read-only (get-amm-lp-balance (market-id uint) (provider principal))
+  (map-get? amm-lp-balances { market-id: market-id, provider: provider }))
+
+;; Get AMM price quote
+(define-read-only (get-amm-price-quote (market-id uint) (outcome (string-ascii 50)) (amount uint))
+  (let ((pool (map-get? amm-pools market-id)))
+    (match pool
+      pool-data 
+        (let ((yes-pool (get yes-pool pool-data))
+              (no-pool (get no-pool pool-data))
+              (fee-amount (/ (* amount amm-fee-percentage) u1000))
+              (amount-after-fee (- amount fee-amount)))
+          (if (is-eq outcome "Yes")
+            ;; Calculate Yes -> No swap
+            (let ((new-yes-pool (+ yes-pool amount-after-fee))
+                  (new-no-pool (/ (get constant-product pool-data) new-yes-pool))
+                  (output-amount (- no-pool new-no-pool)))
+              (ok { input: amount, output: output-amount, fee: fee-amount }))
+            ;; Calculate No -> Yes swap  
+            (let ((new-no-pool (+ no-pool amount-after-fee))
+                  (new-yes-pool (/ (get constant-product pool-data) new-no-pool))
+                  (output-amount (- yes-pool new-yes-pool)))
+              (ok { input: amount, output: output-amount, fee: fee-amount }))))
+      (err error-invalid-market))))
+
+;; Define governance proposal types
+(define-constant proposal-type-parameter 0x01)
+(define-constant proposal-type-upgrade 0x02)
+(define-constant proposal-type-treasury 0x03)
+
+;; Governance proposals
+(define-map governance-proposals
+  uint
+  {
+    proposer: principal,
+    title: (string-ascii 100),
+    description: (string-utf8 1000),
+    proposal-type: (buff 1),
+    parameter-key: (optional (string-ascii 50)),
+    parameter-value: (optional uint),
+    stx-amount: (optional uint),
+    recipient: (optional principal),
+    contract-to-call: (optional principal),
+    function-to-call: (optional (string-ascii 50)),
+    voting-start-block: uint,
+    voting-end-block: uint,
+    status: (buff 1),
+    yes-votes: uint,
+    no-votes: uint,
+    execution-block: (optional uint)
+  })
+
+;; Governance votes
+(define-map governance-votes
+  { proposal-id: uint, voter: principal }
+  { vote: (buff 1), weight: uint })
+
+(define-data-var proposal-id-nonce uint u0)
+
+;; Governance parameters
+(define-map governance-parameters
+  (string-ascii 50) ;; parameter key
+  { value: uint })
