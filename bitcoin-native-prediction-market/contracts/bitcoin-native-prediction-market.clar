@@ -684,3 +684,105 @@
         { tokens: lp-tokens })
       
       (ok lp-tokens))))
+
+;; Swap function for binary markets
+(define-public (amm-swap (market-id uint) (input-outcome (string-ascii 50)) (amount uint))
+  (let ((pool (unwrap! (map-get? amm-pools market-id) error-invalid-market))
+        (market (unwrap! (map-get? markets market-id) error-invalid-market))
+        (yes-pool (get yes-pool pool))
+        (no-pool (get no-pool pool))
+        (constant-product (get constant-product pool)))
+    
+    ;; Check market is active
+    (asserts! (is-eq (get status market) 0x01) error-invalid-state)
+    
+    ;; Calculate swap based on input outcome
+    (if (is-eq input-outcome "Yes")
+      ;; Swapping Yes -> No
+      (let ((fee-amount (/ (* amount amm-fee-percentage) u1000))
+            (amount-after-fee (- amount fee-amount))
+            (new-yes-pool (+ yes-pool amount-after-fee))
+            (new-no-pool (/ constant-product new-yes-pool))
+            (output-amount (- no-pool new-no-pool)))
+        
+        ;; Transfer input amount from user
+        (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+        
+        ;; Transfer output amount to user
+        (as-contract (try! (stx-transfer? output-amount tx-sender tx-sender)))
+        
+        ;; Update pool state
+        (map-set amm-pools market-id
+          (merge pool {
+            yes-pool: new-yes-pool,
+            no-pool: new-no-pool,
+            fee-collected: (+ (get fee-collected pool) fee-amount)
+          }))
+        
+        (ok { input: amount, output: output-amount, fee: fee-amount }))
+        
+      ;; Swapping No -> Yes  
+      (let ((fee-amount (/ (* amount amm-fee-percentage) u1000))
+            (amount-after-fee (- amount fee-amount))
+            (new-no-pool (+ no-pool amount-after-fee))
+            (new-yes-pool (/ constant-product new-no-pool))
+            (output-amount (- yes-pool new-yes-pool)))
+        
+        ;; Transfer input amount from user
+        (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+        
+        ;; Transfer output amount to user
+        (as-contract (try! (stx-transfer? output-amount tx-sender tx-sender)))
+        
+        ;; Update pool state
+        (map-set amm-pools market-id
+          (merge pool {
+            yes-pool: new-yes-pool,
+            no-pool: new-no-pool,
+            fee-collected: (+ (get fee-collected pool) fee-amount)
+          }))
+        
+        (ok { input: amount, output: output-amount, fee: fee-amount })))))
+
+
+;; Add liquidity to AMM
+(define-public (add-amm-liquidity (market-id uint) (yes-amount uint) (no-amount uint))
+  (let ((pool (unwrap! (map-get? amm-pools market-id) error-invalid-market))
+        (market (unwrap! (map-get? markets market-id) error-invalid-market))
+        (yes-pool (get yes-pool pool))
+        (no-pool (get no-pool pool))
+        (total-lp-tokens (get lp-tokens pool)))
+    
+    ;; Check market is active
+    (asserts! (is-eq (get status market) 0x01) error-invalid-state)
+    
+    ;; Calculate proportion of pool being added
+    (let ((yes-ratio (/ (* yes-amount u1000000) yes-pool))
+          (no-ratio (/ (* no-amount u1000000) no-pool)))
+      
+      ;; Ensure balanced liquidity addition
+      (asserts! (is-eq yes-ratio no-ratio) error-invalid-amount)
+      
+      ;; Calculate new LP tokens
+      (let ((new-lp-tokens (/ (* total-lp-tokens yes-ratio) u1000000))
+            (user-lp-balance (default-to { tokens: u0 } 
+                             (map-get? amm-lp-balances { market-id: market-id, provider: tx-sender }))))
+        
+        ;; Transfer funds to contract
+        (try! (stx-transfer? (+ yes-amount no-amount) tx-sender (as-contract tx-sender)))
+        
+        ;; Update pool state
+        (map-set amm-pools market-id
+          (merge pool {
+            yes-pool: (+ yes-pool yes-amount),
+            no-pool: (+ no-pool no-amount),
+            constant-product: (* (+ yes-pool yes-amount) (+ no-pool no-amount)),
+            lp-tokens: (+ total-lp-tokens new-lp-tokens)
+          }))
+        
+        ;; Update LP token balance
+        (map-set amm-lp-balances
+          { market-id: market-id, provider: tx-sender }
+          { tokens: (+ (get tokens user-lp-balance) new-lp-tokens) })
+        
+        (ok new-lp-tokens)))))
