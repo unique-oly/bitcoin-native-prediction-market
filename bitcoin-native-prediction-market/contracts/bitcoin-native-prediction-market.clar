@@ -285,3 +285,11 @@
         total-volume: (+ (get total-volume activity) amount),
         last-activity-block: stacks-block-height
       }))))
+
+(define-map featured-markets
+  uint
+  { featured-until: uint, promoted-by: principal })
+
+(define-map market-whitelist
+  { market-id: uint, user: principal }
+  { allowed: bool })
